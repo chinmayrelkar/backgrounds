@@ -8,7 +8,7 @@ macOS app for things **you** started, not system processes.
 
 ## Download
 
-[v1.0.0](https://github.com/chinmayrelkar/backgrounds/releases/tag/v1.0.0) — grab `Backgrounds.app.zip`, unzip, move the app to `/Applications`.
+[v1.0.1](https://github.com/chinmayrelkar/backgrounds/releases/tag/v1.0.1) — grab `Backgrounds.app.zip`, unzip, move the app to `/Applications`.
 
 First launch: right-click the app → Open. It is ad-hoc signed, so Gatekeeper will complain once.
 
