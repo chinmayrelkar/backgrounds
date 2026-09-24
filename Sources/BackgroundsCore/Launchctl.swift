@@ -2,10 +2,14 @@ import Foundation
 
 public enum Launchctl {
     public static func inventory() throws -> [LaunchItem] {
-        let status = try listStatus()
+        let guiStatus = try listStatus()
+        let systemStatus = (try? systemStatus()) ?? [:]
+        let guiDisabled = disabledLabels(domain: AgentScope.user.domainPrefix)
+        let systemDisabled = disabledLabels(domain: AgentScope.daemon.domainPrefix)
         var items: [LaunchItem] = []
-        var seen = Set<String>()
         for scope in AgentScope.allCases {
+            let status = scope == .daemon ? systemStatus : guiStatus
+            let disabled = scope == .daemon ? systemDisabled : guiDisabled
             for url in plistURLs(in: scope) {
                 var item = try parsePlist(url, scope: scope)
                 if let runtime = status[item.label] {
@@ -13,8 +17,8 @@ public enum Launchctl {
                     item.lastExit = runtime.lastExit
                     item.listed = runtime.listed
                 }
+                item.disabled = disabled.contains(item.label)
                 items.append(item)
-                seen.insert(item.label)
             }
         }
         return items.sorted { lhs, rhs in
@@ -26,25 +30,36 @@ public enum Launchctl {
     }
 
     public static func stop(_ item: LaunchItem) throws {
-        _ = try Shell.run("/bin/launchctl", ["bootout", item.serviceTarget], admin: item.scope.needsAdmin)
+        _ = try Shell.run("/bin/launchctl", ["bootout", item.serviceTarget], admin: item.scope.controlNeedsAdmin)
     }
 
     public static func start(_ item: LaunchItem) throws {
         _ = try Shell.run(
             "/bin/launchctl",
             ["bootstrap", item.scope.domainPrefix, item.plistPath],
-            admin: item.scope.needsAdmin
+            admin: item.scope.controlNeedsAdmin
         )
+    }
+
+    /// Unload now and keep it from loading at next login, without deleting the plist.
+    public static func disable(_ item: LaunchItem) throws {
+        _ = try Shell.run("/bin/launchctl", ["disable", item.serviceTarget], admin: item.scope.controlNeedsAdmin)
+        if item.listed {
+            do { try stop(item) } catch {
+                if !isMissing(error) { throw error }
+            }
+        }
+    }
+
+    public static func enable(_ item: LaunchItem) throws {
+        _ = try Shell.run("/bin/launchctl", ["enable", item.serviceTarget], admin: item.scope.controlNeedsAdmin)
     }
 
     public static func purge(_ item: LaunchItem) throws {
         if item.listed {
             do { try stop(item) } catch {
                 // Missing/already unloaded is fine; we still want the plist gone.
-                let text = error.localizedDescription.lowercased()
-                if !text.contains("no such") && !text.contains("not found") && !text.contains("could not find") {
-                    throw error
-                }
+                if !isMissing(error) { throw error }
             }
         }
         if item.scope.needsAdmin {
@@ -54,16 +69,58 @@ public enum Launchctl {
         }
     }
 
+    /// Status for the caller's gui domain (~/Library and /Library LaunchAgents).
     public static func listStatus() throws -> [String: RuntimeStatus] {
-        let raw = try Shell.run("/bin/launchctl", ["list"])
+        parseList(try Shell.run("/bin/launchctl", ["list"]))
+    }
+
+    /// Status for the system domain (LaunchDaemons). `launchctl list` as a user never shows these.
+    public static func systemStatus() throws -> [String: RuntimeStatus] {
+        parseSystemPrint(try Shell.output("/bin/launchctl", ["print", "system"]))
+    }
+
+    static func parseList(_ raw: String) -> [String: RuntimeStatus] {
         var result: [String: RuntimeStatus] = [:]
         for line in raw.split(separator: "\n").dropFirst() {
             let cols = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
             guard cols.count >= 3 else { continue }
-            let label = cols[2]
-            let pid = Int(cols[0])
-            let exit = Int(cols[1])
-            result[label] = RuntimeStatus(pid: pid, lastExit: exit, listed: true)
+            result[cols[2]] = RuntimeStatus(pid: Int(cols[0]), lastExit: Int(cols[1]), listed: true)
+        }
+        return result
+    }
+
+    /// Reads the `services = { ... }` block: "<pid> <status> <label>". pid 0 means not running.
+    static func parseSystemPrint(_ raw: String) -> [String: RuntimeStatus] {
+        var result: [String: RuntimeStatus] = [:]
+        var inServices = false
+        for line in raw.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !inServices {
+                if trimmed == "services = {" { inServices = true }
+                continue
+            }
+            if trimmed == "}" { break }
+            let cols = trimmed.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            guard cols.count >= 3, let pid = Int(cols[0]) else { continue }
+            let label = cols[2...].joined(separator: " ")
+            result[label] = RuntimeStatus(pid: pid > 0 ? pid : nil, lastExit: Int(cols[1]), listed: true)
+        }
+        return result
+    }
+
+    static func disabledLabels(domain: String) -> Set<String> {
+        guard let raw = try? Shell.output("/bin/launchctl", ["print-disabled", domain]) else { return [] }
+        return parseDisabled(raw)
+    }
+
+    static func parseDisabled(_ raw: String) -> Set<String> {
+        var result = Set<String>()
+        for line in raw.split(separator: "\n") {
+            let parts = line.components(separatedBy: "=>")
+            guard parts.count == 2 else { continue }
+            let label = parts[0].trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let value = parts[1].trimmingCharacters(in: .whitespaces)
+            if value == "disabled" || value == "true" { result.insert(label) }
         }
         return result
     }
@@ -90,7 +147,7 @@ public enum Launchctl {
             keepAlive = false
         }
 
-        return LaunchItem(
+        var item = LaunchItem(
             label: resolvedLabel,
             scope: scope,
             plistPath: url.path,
@@ -105,6 +162,24 @@ public enum Launchctl {
             listed: false,
             isEmptyPlist: isEmpty
         )
+        item.stdoutPath = expand(dict["StandardOutPath"] as? String)
+        item.stderrPath = expand(dict["StandardErrorPath"] as? String)
+        return item
+    }
+
+    /// Last `maxBytes` of a log file, starting at a line boundary.
+    public static func tail(_ path: String, maxBytes: Int = 32_768) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+        try? handle.seek(toOffset: start)
+        let data = (try? handle.readToEnd()) ?? Data()
+        var text = String(decoding: data, as: UTF8.self)
+        if start > 0, let newline = text.firstIndex(of: "\n") {
+            text = String(text[text.index(after: newline)...])
+        }
+        return text
     }
 
     static func plistURLs(in scope: AgentScope) -> [URL] {
@@ -121,13 +196,24 @@ public enum Launchctl {
         return urls.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
+    private static func isMissing(_ error: Error) -> Bool {
+        let text = error.localizedDescription.lowercased()
+        return text.contains("no such") || text.contains("not found") || text.contains("could not find")
+    }
+
+    private static func expand(_ path: String?) -> String? {
+        guard let path, !path.isEmpty else { return nil }
+        return (path as NSString).expandingTildeInPath
+    }
+
     private static func rank(_ state: AgentState) -> Int {
         switch state {
         case .failed: 0
         case .running: 1
         case .loaded: 2
         case .emptyPlist: 3
-        case .notLoaded: 4
+        case .disabled: 4
+        case .notLoaded: 5
         }
     }
 

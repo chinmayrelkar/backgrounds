@@ -83,6 +83,7 @@ final class LaunchctlTests: XCTestCase {
     }
 
     func testInventorySeesUserPlists() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CI"] != nil, "Needs this Mac's LaunchAgents (redis via Homebrew)")
         let items = try Launchctl.inventory()
         XCTAssertFalse(items.filter { $0.scope == .user }.isEmpty)
         let redis = items.first { $0.label == "homebrew.mxcl.redis" }

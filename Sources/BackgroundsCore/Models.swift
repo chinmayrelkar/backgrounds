@@ -15,14 +15,19 @@ public enum AgentScope: String, Sendable, CaseIterable, Identifiable {
         }
     }
 
+    /// Agents in /Library/LaunchAgents load into each user's gui domain, not the system domain.
     public var domainPrefix: String {
         switch self {
-        case .user: "gui/\(getuid())"
-        case .systemAgent, .daemon: "system"
+        case .user, .systemAgent: "gui/\(getuid())"
+        case .daemon: "system"
         }
     }
 
+    /// Deleting the plist needs admin outside ~/Library.
     public var needsAdmin: Bool { self != .user }
+
+    /// Loading, unloading and disabling only need admin in the system domain.
+    public var controlNeedsAdmin: Bool { self == .daemon }
 
     public var searchDirectories: [URL] {
         switch self {
@@ -42,6 +47,7 @@ public enum AgentState: String, Sendable {
     case loaded
     case failed
     case notLoaded
+    case disabled
     case emptyPlist
 
     public var title: String {
@@ -50,6 +56,7 @@ public enum AgentState: String, Sendable {
         case .loaded: "Loaded"
         case .failed: "Failed"
         case .notLoaded: "Not loaded"
+        case .disabled: "Disabled"
         case .emptyPlist: "Empty stub"
         }
     }
@@ -71,6 +78,9 @@ public struct LaunchItem: Identifiable, Hashable, Sendable {
     public var lastExit: Int?
     public var listed: Bool
     public var isEmptyPlist: Bool
+    public var disabled: Bool = false
+    public var stdoutPath: String?
+    public var stderrPath: String?
 
     public init(
         label: String,
@@ -109,13 +119,40 @@ public struct LaunchItem: Identifiable, Hashable, Sendable {
         if let pid, pid > 0 { return .running }
         if listed, let lastExit, lastExit != 0 { return .failed }
         if listed { return .loaded }
+        if disabled { return .disabled }
         return .notLoaded
     }
 
     public var serviceTarget: String { "\(scope.domainPrefix)/\(label)" }
 
     public var canStop: Bool { listed && !isEmptyPlist }
-    public var canStart: Bool { !listed && !isEmptyPlist }
+    public var canStart: Bool { !listed && !isEmptyPlist && !disabled }
+
+    public var logPaths: [String] {
+        var seen = Set<String>()
+        return [stdoutPath, stderrPath].compactMap { $0 }.filter { seen.insert($0).inserted }
+    }
+
+    /// Plain-English reading of launchd's last exit status.
+    public var exitDescription: String? {
+        guard let lastExit else { return nil }
+        return Self.describeExit(lastExit)
+    }
+
+    public static func describeExit(_ code: Int) -> String {
+        if code == 0 { return "exited cleanly" }
+        if code < 0 {
+            let sig = -code
+            let name = Signals.name(Int32(sig)) ?? "signal \(sig)"
+            return "killed by \(name)"
+        }
+        switch code {
+        case 78: return "exit 78 (bad config)"
+        case 126: return "exit 126 (not executable)"
+        case 127: return "exit 127 (program not found)"
+        default: return "exit \(code)"
+        }
+    }
 }
 
 public struct WatchRoot: Identifiable, Hashable, Sendable {

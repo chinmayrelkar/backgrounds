@@ -57,10 +57,10 @@ public enum UserProcesses {
         }
     }
 
-    public static func stop(_ item: RunningItem) throws {
-        for pid in item.allPIDs {
-            _ = kill(pid_t(pid), SIGTERM)
-        }
+    /// SIGTERM, then SIGKILL whatever is left. Throws if anything survives.
+    @discardableResult
+    public static func stop(_ item: RunningItem) throws -> StopOutcome {
+        try Signals.terminate(item.allPIDs)
     }
 
     public static func isUserTriggered(_ path: String, command: String) -> Bool {
@@ -130,7 +130,7 @@ public enum UserProcesses {
         return false
     }
 
-    private static func isInterpreter(_ path: String) -> Bool {
+    public static func isInterpreter(_ path: String) -> Bool {
         let base = URL(fileURLWithPath: path).lastPathComponent
         return base.hasPrefix("python")
             || base.hasPrefix("ruby")
