@@ -21,7 +21,7 @@ Also: multi-select, hide list, Reveal in Finder, auto reload, menu bar monitor, 
 
 ## Download
 
-[v1.0.1](https://github.com/chinmayrelkar/backgrounds/releases/tag/v1.0.1) — grab `Backgrounds.app.zip`, unzip, move the app to `/Applications`.
+[v1.1.0](https://github.com/chinmayrelkar/backgrounds/releases/tag/v1.1.0) — grab `Backgrounds.app.zip`, unzip, move the app to `/Applications`.
 
 First launch: right-click the app → Open. It is ad-hoc signed, so Gatekeeper will complain once.
 
@@ -44,6 +44,7 @@ make run
 ```
 make dump    # print the inventory and a system sample to the terminal
 make test
+BG_ACTIONS=1 swift test --filter ActionTests   # real start/stop/purge on throwaway targets
 ```
 
 ## Not done yet
