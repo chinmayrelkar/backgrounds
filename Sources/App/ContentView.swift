@@ -23,7 +23,7 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 460, ideal: 620)
         } detail: {
             detail
-                .navigationSplitViewColumnWidth(min: 300, ideal: 340)
+                .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 420)
         }
         .searchable(text: $store.query, prompt: "Filter")
         .toolbar { toolbar }

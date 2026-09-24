@@ -46,7 +46,8 @@ struct Meter: View {
             Text(value)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .frame(width: 110, alignment: .trailing)
+                .frame(minWidth: 110, alignment: .trailing)
+                .fixedSize()
                 .lineLimit(1)
         }
         .font(.callout)
@@ -68,6 +69,8 @@ struct Card<Content: View>: View {
             content()
         }
         .padding(14)
+        // Fill the row so cards side by side line up top and bottom.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
     }
 }
@@ -85,16 +88,35 @@ struct OverviewView: View {
 
     var body: some View {
         if let snap = monitor.latest {
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 14)], spacing: 14) {
-                    cpuCard(snap)
-                    memoryCard(snap)
-                    networkCard(snap)
-                    diskCard(snap)
-                    if !snap.gpus.isEmpty { gpuCard(snap) }
-                    systemCard(snap)
+            GeometryReader { geo in
+                ScrollView {
+                    // CPU across the top, then pairs. One column when the window is narrow.
+                    VStack(spacing: 14) {
+                        cpuCard(snap)
+                        if geo.size.width >= 700 {
+                            Grid(horizontalSpacing: 14, verticalSpacing: 14) {
+                                GridRow(alignment: .top) {
+                                    memoryCard(snap)
+                                    networkCard(snap)
+                                }
+                                GridRow(alignment: .top) {
+                                    diskCard(snap)
+                                    VStack(spacing: 14) {
+                                        if !snap.gpus.isEmpty { gpuCard(snap) }
+                                        systemCard(snap)
+                                    }
+                                }
+                            }
+                        } else {
+                            memoryCard(snap)
+                            networkCard(snap)
+                            diskCard(snap)
+                            if !snap.gpus.isEmpty { gpuCard(snap) }
+                            systemCard(snap)
+                        }
+                    }
+                    .padding(14)
                 }
-                .padding(14)
             }
         } else {
             ProgressView("Sampling…").frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -113,8 +135,7 @@ struct OverviewView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .monospacedDigit()
-            let columns = snap.cpu.cores.count > 8 ? 4 : 2
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: columns), spacing: 6) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 8) {
                 ForEach(Array(snap.cpu.cores.enumerated()), id: \.offset) { index, core in
                     CoreCell(
                         label: coreLabel(index),
@@ -151,7 +172,12 @@ struct OverviewView: View {
     }
 
     private func networkCard(_ snap: SystemSnapshot) -> some View {
-        let active = snap.network.filter { $0.isUp && $0.name != "lo0" && ($0.totalIn > 0 || $0.totalOut > 0) }
+        // Tunnels, bridges and VM NICs are mostly idle noise. Show real links and anything moving.
+        let up = snap.network.filter { $0.isUp && $0.name != "lo0" }
+        let active = up.filter { net in
+            net.inPerSecond + net.outPerSecond > 0 || (net.name.hasPrefix("en") && net.totalIn + net.totalOut > 0)
+        }
+        let idle = up.count - active.count
         return Card(title: "Network") {
             HStack {
                 Label(Format.rate(monitor.netIn.last), systemImage: "arrow.down").foregroundStyle(.blue)
@@ -176,14 +202,24 @@ struct OverviewView: View {
                             .monospacedDigit()
                     }
                     Text("total ↓ \(Format.bytes(net.totalIn))  ↑ \(Format.bytes(net.totalOut))"
-                         + (net.addresses.isEmpty ? "" : "  ·  " + net.addresses.prefix(2).joined(separator: ", ")))
+                         + (primaryAddress(net).map { "  ·  " + $0 } ?? ""))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
                 .font(.caption)
             }
+            if idle > 0 {
+                Text("\(idle) idle interface\(idle == 1 ? "" : "s") hidden")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
         }
+    }
+
+    /// IPv4 first; skip link-local IPv6 (fe80::), which is never what you want to read.
+    private func primaryAddress(_ net: NetRate) -> String? {
+        net.addresses.first { !$0.contains(":") } ?? net.addresses.first { !$0.hasPrefix("fe80") }
     }
 
     private func diskCard(_ snap: SystemSnapshot) -> some View {
@@ -287,7 +323,7 @@ private struct CoreCell: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(label).font(.caption2).foregroundStyle(.secondary).frame(width: 26, alignment: .leading)
-            HistoryGraph(values: Array(values.suffix(40)), color: loadColor(busy), height: 18)
+            HistoryGraph(values: Array(values.suffix(60)), color: loadColor(busy), height: 24)
             Text(Format.percent(busy)).font(.caption2).monospacedDigit().frame(width: 34, alignment: .trailing)
         }
     }
@@ -301,14 +337,18 @@ struct TopProcesses: View {
     var body: some View {
         let procs = monitor.latest?.processes ?? []
         List {
+            // Rows are keyed per section. Keyed by pid alone, a process in both lists
+            // reused its CPU row under Top memory and showed a percentage there.
             Section("Top CPU") {
-                ForEach(procs.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(8)) { row in
+                ForEach(procs.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(8), id: \.pid) { row in
                     line(row, value: String(format: "%.1f%%", monitor.displayCPU(row.cpuPercent, perCore: store.settings.cpuPerCore)))
+                        .id("cpu-\(row.pid)")
                 }
             }
             Section("Top memory") {
-                ForEach(procs.sorted { $0.residentBytes > $1.residentBytes }.prefix(8)) { row in
+                ForEach(procs.sorted { $0.residentBytes > $1.residentBytes }.prefix(8), id: \.pid) { row in
                     line(row, value: Format.bytes(row.residentBytes))
+                        .id("mem-\(row.pid)")
                 }
             }
         }
