@@ -87,8 +87,10 @@ final class FixesTests: XCTestCase {
         XCTAssertEqual(try Signals.terminate([999_999]), .alreadyGone)
     }
 
-    func testSignalOtherUserWithoutAdminThrows() {
+    func testSignalOtherUserWithoutAdminThrows() throws {
         // launchd (pid 1) is root's; we must get a clear error, not silent success.
+        // CI runners may be allowed to signal it, which makes the premise false there.
+        try XCTSkipIf(kill(1, 0) == 0, "This process may signal pid 1 (running as root?)")
         XCTAssertThrowsError(try Signals.send(SIGCONT, to: 1, allowAdmin: false)) { error in
             guard case SignalError.notPermitted(pid: 1) = error else { return XCTFail("\(error)") }
         }
